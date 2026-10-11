@@ -1,0 +1,44 @@
+{
+  "id": "fl-firearms",
+  "title": "FL Firearms",
+  "description": "Огнестрельное оружие 18–19 века, магазины, Камора и пороховые осечки для Forbidden Lands.",
+  "version": "0.4.6",
+  "authors": [
+    {
+      "name": "Mikhail"
+    }
+  ],
+  "compatibility": {
+    "minimum": "13.351",
+    "verified": "13.351"
+  },
+  "relationships": {
+    "systems": [
+      {
+        "id": "forbidden-lands",
+        "type": "system",
+        "compatibility": {
+          "minimum": "13.0.5",
+          "verified": "13.0.5"
+        }
+      }
+    ]
+  },
+  "esmodules": [
+    "scripts/main.js"
+  ],
+  "styles": [
+    "styles/base.css",
+    "styles/sheets.css",
+    "styles/apps.css",
+    "styles/chat.css"
+  ],
+  "languages": [
+    {
+      "lang": "ru",
+      "name": "Русский",
+      "path": "lang/ru.json"
+    }
+  ],
+  "readme": "README.md"
+}

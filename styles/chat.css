@@ -1,0 +1,8 @@
+.flf-chat-card { padding: 7px 9px; border: 1px solid var(--flf-border); border-left-width: 3px; border-radius: 3px; background: var(--flf-accent-soft); }
+.flf-chat-card header { color: var(--flf-accent); font-weight: 800; }
+.flf-chat-card p { margin: 4px 0 0; }
+.flf-chat-card--warning { border-left-color: var(--flf-warning); }
+.flf-chat-card--danger { border-left-color: var(--flf-danger); }
+.fl-mishap-breakdown-card { padding: 7px 9px; border: 1px solid var(--flf-border); background: var(--flf-accent-soft); }
+.fl-mishap-breakdown-card strong { color: var(--flf-accent); }
+.fl-mishap-breakdown-features { margin-top: 4px; opacity: 0.82; }

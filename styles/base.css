@@ -1,0 +1,14 @@
+:root {
+  --flf-accent: #7a1f1f;
+  --flf-accent-soft: rgba(122, 31, 31, 0.08);
+  --flf-border: rgba(122, 31, 31, 0.42);
+  --flf-warning: #9a6200;
+  --flf-danger: #9d1b1b;
+  --flf-success: #267344;
+}
+
+.flf-app { --color-border-light-primary: var(--flf-border); }
+.flf-app button { cursor: pointer; }
+.flf-app input:invalid { outline: 2px solid var(--flf-danger); }
+.flf-app .hint { opacity: 0.72; font-size: 0.9em; }
+.flf-hidden { display: none; }
