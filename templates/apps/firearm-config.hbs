@@ -1,0 +1,52 @@
+<header class="flf-config__header">
+  <img src="{{item.img}}" alt="" />
+  <div><h2>{{item.name}}</h2><p>{{#if data.validRangedWeapon}}Дальнобойное оружие{{else}}Автоматизация отключена{{/if}}</p></div>
+  <label class="flf-switch"><input type="checkbox" name="isFirearm" {{#if data.enabled}}checked{{/if}} {{#unless editable}}disabled{{/unless}}><span>Огнестрел</span></label>
+</header>
+
+<nav class="flf-tabs">
+  <button type="button" class="active" data-tab-target="basic">Основное</button>
+  <button type="button" data-tab-target="features">Свойства</button>
+  <button type="button" data-tab-target="mishap">Осечки</button>
+</nav>
+
+<div class="flf-config__body">
+  {{#if warnings.length}}<section class="flf-warnings">{{#each warnings}}<p><i class="fa-solid fa-triangle-exclamation"></i> {{this}}</p>{{/each}}</section>{{/if}}
+
+  <section data-tab-panel="basic">
+    <div class="flf-form-grid">
+      <label>Тип<select name="firearmType"><option value="regular" {{#if isRegular}}selected{{/if}}>Обычный</option><option value="artifact" {{#if isArtifact}}selected{{/if}}>Артефактный</option></select></label>
+      <label>Перезарядка<select name="reloadType"><option value="Fast" {{#if reloadFast}}selected{{/if}}>Fast</option><option value="Slow" {{#if reloadSlow}}selected{{/if}}>Slow</option><option value="S" {{#if reloadSeconds}}selected{{/if}}>Секунды</option><option value="MAG" {{#if reloadMagazine}}selected{{/if}}>Магазин</option></select></label>
+      <label>Значение перезарядки<input type="text" name="reloadValue" value="{{data.reloadValue}}" maxlength="40"></label>
+      <label>Емкость магазина<input type="number" name="magCapacity" value="{{data.magazine.capacity}}" min="0" max="999"></label>
+      <label>Патронов сейчас<input type="number" name="magCurrent" value="{{magazineCurrent}}" min="0" max="{{data.magazine.capacity}}"></label>
+      <div class="flf-inline-actions"><button type="button" data-action="fillMagazine">Заполнить</button><button type="button" data-action="emptyMagazine">Очистить</button></div>
+      <label>Операция БП<select name="apOp"><option value="*" {{#if apMultiply}}selected{{/if}}>Умножить</option><option value="+" {{#if apPlus}}selected{{/if}}>Прибавить</option><option value="-" {{#if apMinus}}selected{{/if}}>Вычесть</option></select></label>
+      <label>Значение БП<input type="number" step="0.01" name="apValue" value="{{data.armorPiercing.value}}"></label>
+    </div>
+  </section>
+
+  <section data-tab-panel="features" hidden>
+    {{#if data.features.length}}
+    <div class="flf-active-order"><h3>Порядок активных свойств</h3>{{#each data.features}}<div><span>{{label}}{{#if value}} {{value}}{{/if}}</span><span><button type="button" data-action="moveFeatureUp" data-feature="{{key}}" title="Выше"><i class="fa-solid fa-arrow-up"></i></button><button type="button" data-action="moveFeatureDown" data-feature="{{key}}" title="Ниже"><i class="fa-solid fa-arrow-down"></i></button></span></div>{{/each}}</div>
+    {{/if}}
+    <input class="flf-feature-search" type="search" data-feature-search placeholder="Поиск свойства">
+    {{#each groups}}
+      <fieldset class="flf-feature-group"><legend>{{label}}</legend><div class="flf-feature-grid">
+      {{#each features}}
+        <label class="flf-feature">
+          <span><input type="checkbox" name="feat_{{key}}" {{#if enabled}}checked{{/if}}> <strong>{{label}}</strong> {{#if automated}}<i class="fa-solid fa-gears" title="Автоматизировано"></i>{{else}}<i class="fa-regular fa-note-sticky" title="Информационное"></i>{{/if}}</span>
+          {{#if hasInput}}<input type="{{#if isNumber}}number{{else}}text{{/if}}" min="0" name="val_{{key}}" value="{{value}}" placeholder="{{placeholder}}">{{/if}}
+        </label>
+      {{/each}}
+      </div></fieldset>
+    {{/each}}
+  </section>
+
+  <section data-tab-panel="mishap" hidden>
+    <div class="flf-profile-card"><h3>Итоговый профиль</h3><p>Обычная проверка: <strong>{{#if misfire.primaryFormula}}{{misfire.primaryFormula}}{{else}}отключена{{/if}}</strong></p><p>Камора: <strong>{{#if misfire.kamoraFormula}}{{misfire.kamoraFormula}}{{else}}нет{{/if}}</strong></p><p>Таблица: {{#if data.firearmType}}{{data.firearmType}}{{/if}}</p><button type="button" data-action="testMisfire"><i class="fa-solid fa-dice"></i> Тестовый бросок</button></div>
+    <p class="hint">Тестовый бросок не создает осечку, не тратит патрон и не бросает таблицу.</p>
+  </section>
+</div>
+
+<footer class="flf-app__footer"><span>{{#unless editable}}Нет прав на изменение предмета{{/unless}}</span><button type="submit" {{#unless editable}}disabled{{/unless}}><i class="fa-solid fa-floppy-disk"></i> Сохранить</button></footer>

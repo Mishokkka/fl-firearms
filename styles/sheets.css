@@ -1,0 +1,266 @@
+.fl-firearm-toggle {
+  cursor: pointer;
+}
+
+.fl-firearm-toggle.active {
+  color: var(--flf-accent);
+}
+
+.fl-hidden {
+  display: none !important;
+}
+
+/* Inline firearm statistics. The layout deliberately follows the native
+   Forbidden Lands item-sheet rows instead of introducing a separate panel. */
+.fl-firearms-row {
+  align-items: flex-end;
+  gap: 10px;
+  margin: 0 8px 2px;
+}
+
+.fl-firearms-row .fl-group {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.fl-firearms-row .fl-group label {
+  display: block;
+  width: 100%;
+  margin: 0 0 2px;
+  line-height: 1.1;
+  text-align: left;
+  cursor: help;
+}
+
+.fl-firearms-row .fl-combo {
+  display: flex;
+  width: 100%;
+  gap: 5px;
+}
+
+.fl-firearms-row select,
+.fl-firearms-row input {
+  min-width: 0;
+  height: 24px;
+  box-sizing: border-box;
+  font-weight: 700;
+}
+
+.fl-firearms-row .fl-combo select {
+  flex: 1 1 auto;
+}
+
+.fl-firearms-row .fl-reload-val,
+.fl-firearms-row .fl-mag-val,
+.fl-firearms-row .fl-ap-val {
+  flex: 0 0 44px;
+  width: 44px;
+  padding-inline: 3px;
+  text-align: center;
+}
+
+.fl-firearms-row .fl-ap-op {
+  text-align: center;
+}
+
+/* Firearm feature chips. */
+.fl-features-wrapper {
+  margin: 5px 8px 4px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.fl-active-features,
+.fl-inactive-features {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.fl-active-features:empty {
+  display: none;
+}
+
+.fl-feature-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  box-sizing: border-box;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.9em;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.fl-feature-badge.active {
+  padding: 2px 5px;
+  border: 1px solid var(--flf-accent);
+  background: var(--flf-accent-soft);
+  color: var(--flf-accent);
+  cursor: grab;
+}
+
+.fl-feature-badge.active:active {
+  cursor: grabbing;
+}
+
+.fl-feature-label {
+  cursor: help;
+}
+
+.fl-feature-badge .fl-feat-val {
+  width: 40px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0 0 0 5px;
+  padding: 0 3px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.72);
+  color: inherit;
+  font: inherit;
+  text-align: center;
+}
+
+.fl-feature-drag-handle {
+  margin-right: 5px;
+  opacity: 0.65;
+  cursor: grab;
+  font-size: 0.85em;
+}
+
+.fl-remove-feature {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0 0 0 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  opacity: 0.58;
+  line-height: 1;
+}
+
+.fl-remove-feature:hover {
+  opacity: 1;
+  color: #a00000;
+  text-shadow: none;
+}
+
+.fl-features-menu {
+  margin-top: 5px;
+}
+
+.fl-toggle-menu {
+  display: inline-block;
+  margin-bottom: 4px;
+  color: inherit;
+  opacity: 0.68;
+  font-size: 0.85em;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.fl-toggle-menu:hover {
+  opacity: 1;
+  text-shadow: none;
+}
+
+.fl-toggle-menu i {
+  width: 12px;
+  text-align: center;
+}
+
+.fl-inactive-features {
+  padding: 6px;
+  border: 1px dashed rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.025);
+}
+
+.fl-feature-badge.inactive {
+  width: auto;
+  min-width: 0;
+  padding: 3px 7px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  background: rgba(255, 255, 255, 0.35);
+  color: inherit;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.fl-feature-badge.inactive:hover {
+  border-color: currentColor;
+  background: rgba(0, 0, 0, 0.06);
+  text-shadow: none;
+}
+
+.fl-feature-dragging {
+  opacity: 0.42;
+}
+
+.fl-feature-drop-target {
+  outline: 2px dashed color-mix(in srgb, var(--flf-accent) 70%, transparent);
+  outline-offset: 2px;
+}
+
+/* Magazine controls on the actor sheet. */
+.weapon .name .fl-mag-counter {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0 6px 0 4px;
+  padding: 1px 4px;
+  border: 1px solid var(--flf-border);
+  border-radius: 3px;
+  background: var(--flf-accent-soft);
+  color: var(--flf-accent);
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.weapon .name .fl-mag-current {
+  width: 1.7em;
+  height: 16px;
+  min-height: 16px;
+  padding: 0 2px;
+  margin: 0;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  border-radius: 2px;
+  background: var(--color-bg, #fff);
+  text-align: center;
+  font-weight: 700;
+  line-height: 16px;
+  appearance: textfield;
+}
+
+.weapon .name .fl-mag-current[data-digits="1"] { width: 1.2em; }
+.weapon .name .fl-mag-current[data-digits="3"] { width: 2.2em; }
+.weapon .name .fl-mag-current::-webkit-inner-spin-button,
+.weapon .name .fl-mag-current::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.weapon-actions .fl-mag-actions { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; }
+.weapon-actions .fl-mag-action { margin: 0; padding: 0 2px; border: 0; background: transparent; box-shadow: none; font: inherit; font-weight: 700; line-height: 1.15; }
+.weapon-actions .fl-mag-action:hover { text-shadow: 0 0 5px var(--color-shadow-primary); }
+
+@media (max-width: 560px) {
+  .fl-firearms-row {
+    flex-wrap: wrap;
+  }
+
+  .fl-firearms-row .fl-group {
+    flex: 1 1 calc(50% - 5px);
+  }
+}

@@ -1,0 +1,18 @@
+<div class="flf-diagnostics__summary">
+  <span><strong>{{report.summary.firearms}}</strong> огнестрелов</span>
+  <span><strong>{{report.summary.magazines}}</strong> магазинов</span>
+  <span class="flf-status--error"><strong>{{report.summary.errors}}</strong> ошибок</span>
+  <span class="flf-status--warning"><strong>{{report.summary.warnings}}</strong> предупреждений</span>
+</div>
+<div class="flf-diagnostics__checks">
+  {{#each report.checks}}
+  <article class="flf-check flf-check--{{status}}">
+    <i class="fa-solid {{icon}}"></i>
+    <div><strong>{{label}}</strong><p>{{detail}}</p></div>
+  </article>
+  {{/each}}
+</div>
+<footer class="flf-app__footer">
+  <small>Проверено: {{report.generatedAt}}. Контекстов броска в очереди: {{report.summary.pendingContexts}}.</small>
+  <button type="button" data-action="refresh"><i class="fa-solid fa-rotate"></i> Проверить снова</button>
+</footer>
