@@ -32,7 +32,7 @@ export function getFirearmTooltipData(item) {
 
     const data = getFirearmData(item);
     const features = getActiveFirearmFeatures(item);
-    const current = data.magazine.current ?? data.magazine.capacity;
+    const current = getMagazineCurrent(item);
 
     // Keep the original flat contract used by FBL Quick Access and old macros.
     // New structured fields are returned alongside it, never instead of it.

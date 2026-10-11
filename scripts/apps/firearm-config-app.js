@@ -1,6 +1,7 @@
 import { FEATURE_GROUPS, FIREARM_FEATURES, MODULE_ID } from "../constants.js";
-import { getFirearmData, getMisfireProfile, sanitizeFeatureValue, toInteger } from "../firearm-data.js";
-import { getMagazineCapacity, getMagazineCurrent } from "../magazine.js";
+import { getFirearmData, getMisfireProfile, getFeatureOrder, sanitizeFeatureValue, toInteger } from "../firearm-data.js";
+import { SETTINGS, getSetting } from "../settings.js";
+import { getMagazineCurrent, updateFirearmConfiguration } from "../magazine.js";
 import { ensureItemSheetRendered, getItemSheetRenderGeneration } from "../item-sheet.js";
 
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
@@ -8,8 +9,10 @@ const OPEN_APPS = new Map();
 
 export class FirearmConfigApp extends HandlebarsApplicationMixin(ApplicationV2) {
     constructor(item, options = {}) {
-        super({ ...options, id: `${MODULE_ID}-config-${item.id}` });
+        super({ ...options, id: `${MODULE_ID}-config-${Array.from(item.uuid, char => char.codePointAt(0).toString(16)).join("-")}` });
         this.item = item;
+        this._draftOrder = getFeatureOrder(item);
+        this._activeTab = "basic";
     }
 
     static DEFAULT_OPTIONS = {
@@ -39,6 +42,7 @@ export class FirearmConfigApp extends HandlebarsApplicationMixin(ApplicationV2) 
         const context = await super._prepareContext(options);
         const data = getFirearmData(this.item);
         const misfire = getMisfireProfile(this.item);
+        if (!getSetting(SETTINGS.ENABLE_PRIMARY_MISHAP)) misfire.primaryFormula = null;
         const groups = Object.entries(FEATURE_GROUPS).map(([key, label]) => ({
             key,
             label,
@@ -74,6 +78,15 @@ export class FirearmConfigApp extends HandlebarsApplicationMixin(ApplicationV2) 
     async _onRender(context, options) {
         await super._onRender(context, options);
         const root = this.element;
+        this._ammoDraftChanged = false;
+        root.querySelector("[name=magCurrent]")?.addEventListener("input", () => { this._ammoDraftChanged = true; });
+        if (!this.item.isOwner) root.querySelectorAll("input:not([data-feature-search]), select, button[data-action]:not([data-action=testMisfire])").forEach(control => { control.disabled = true; });
+        for (const panel of root.querySelectorAll("[data-tab-panel]")) panel.hidden = panel.dataset.tabPanel !== this._activeTab;
+        for (const tab of root.querySelectorAll("[data-tab-target]")) tab.classList.toggle("active", tab.dataset.tabTarget === this._activeTab);
+        root.querySelector("[name=magCapacity]")?.addEventListener("input", event => {
+            const current = root.querySelector("[name=magCurrent]");
+            if (current) current.max = String(toInteger(event.target.value, 0, 999, 0));
+        });
         const search = root.querySelector("[data-feature-search]");
         search?.addEventListener("input", () => {
             const query = search.value.trim().toLocaleLowerCase("ru");
@@ -86,6 +99,7 @@ export class FirearmConfigApp extends HandlebarsApplicationMixin(ApplicationV2) 
             tab.addEventListener("click", event => {
                 event.preventDefault();
                 const target = tab.dataset.tabTarget;
+                this._activeTab = target;
                 for (const button of root.querySelectorAll("[data-tab-target]")) button.classList.toggle("active", button === tab);
                 for (const panel of root.querySelectorAll("[data-tab-panel]")) panel.hidden = panel.dataset.tabPanel !== target;
             });
@@ -121,11 +135,13 @@ export class FirearmConfigApp extends HandlebarsApplicationMixin(ApplicationV2) 
                     : null;
             }
         }
-        updates[`flags.${MODULE_ID}.featureOrder`] = preserveOrder(this.item, order);
+        updates[`flags.${MODULE_ID}.featureOrder`] = preserveOrder(this._draftOrder, order);
 
+        if (reloadType === "MAG" && !this._ammoDraftChanged) delete updates[`flags.${MODULE_ID}.magCurrent`];
         const nativeSheet = this.item.sheet;
         const nativeGeneration = getItemSheetRenderGeneration(nativeSheet);
-        await this.item.update(updates);
+        await updateFirearmConfiguration(this.item, updates);
+        this._draftOrder = updates[`flags.${MODULE_ID}.featureOrder`];
         await ensureItemSheetRendered(nativeSheet, nativeGeneration);
         ui.notifications.info(`${this.item.name}: настройки огнестрела сохранены.`);
         await this.render({ force: true });
@@ -133,19 +149,26 @@ export class FirearmConfigApp extends HandlebarsApplicationMixin(ApplicationV2) 
 
     static async fillMagazine() {
         if (!this.item?.isOwner) return;
-        const capacity = getMagazineCapacity(this.item);
-        await this.item.setFlag(MODULE_ID, "magCurrent", capacity);
-        await this.render({ force: true });
+        this._ammoDraftChanged = true;
+        const form = this.element;
+        const capacity = toInteger(form.querySelector("[name=magCapacity]")?.value, 0, 999, 0);
+        const current = form.querySelector("[name=magCurrent]");
+        if (current) { current.value = String(capacity); current.max = String(capacity); }
     }
 
     static async emptyMagazine() {
         if (!this.item?.isOwner) return;
-        await this.item.setFlag(MODULE_ID, "magCurrent", 0);
-        await this.render({ force: true });
+        this._ammoDraftChanged = true;
+        const current = this.element.querySelector("[name=magCurrent]");
+        if (current) current.value = "0";
     }
 
     static async testMisfire() {
-        const profile = getMisfireProfile(this.item);
+        const profile = getMisfireProfile({ getFlag: (_scope, key) => {
+            const input = this.element.querySelector(`[name="${key}"]`);
+            return input?.type === "checkbox" ? input.checked : this.item.getFlag(MODULE_ID, key);
+        } });
+        if (!getSetting(SETTINGS.ENABLE_PRIMARY_MISHAP)) profile.primaryFormula = null;
         const formulas = [profile.primaryFormula, profile.kamoraFormula].filter(Boolean);
         if (!formulas.length) {
             ui.notifications.info(`${this.item.name}: первичная проверка осечки отключена.`);
@@ -170,19 +193,22 @@ export class FirearmConfigApp extends HandlebarsApplicationMixin(ApplicationV2) 
 
     async _moveFeature(key, delta) {
         if (!this.item?.isOwner || !key) return;
-        const order = this.item.getFlag(MODULE_ID, "featureOrder") ?? [];
-        const active = this.item.getFlag(MODULE_ID, `feat_${key}`);
+        const order = this._draftOrder;
+        const active = this.element.querySelector(`[name="feat_${key}"]`)?.checked;
         if (!active) return;
         const normalized = Array.isArray(order) ? [...order] : [];
         for (const feature of FIREARM_FEATURES) {
-            if (this.item.getFlag(MODULE_ID, `feat_${feature.key}`) && !normalized.includes(feature.key)) normalized.push(feature.key);
+            if (this.element.querySelector(`[name="feat_${feature.key}"]`)?.checked && !normalized.includes(feature.key)) normalized.push(feature.key);
         }
         const index = normalized.indexOf(key);
         const next = index + delta;
         if (index < 0 || next < 0 || next >= normalized.length) return;
         [normalized[index], normalized[next]] = [normalized[next], normalized[index]];
-        await this.item.setFlag(MODULE_ID, "featureOrder", normalized);
-        await this.render({ force: true });
+        this._draftOrder = normalized;
+        const list = this.element.querySelector(".flf-active-order");
+        if (!list) return;
+        const rows = new Map([...list.querySelectorAll(":scope > div")].map(row => [row.querySelector("[data-feature]")?.dataset.feature, row]));
+        for (const featureKey of normalized) if (rows.has(featureKey)) list.appendChild(rows.get(featureKey));
     }
 
     async _onClose(options) {
@@ -219,8 +245,7 @@ function sanitizeNumberOrBlank(value) {
     return Number.isFinite(number) ? number : "";
 }
 
-function preserveOrder(item, activeKeys) {
-    const previous = item.getFlag(MODULE_ID, "featureOrder");
+function preserveOrder(previous, activeKeys) {
     const active = new Set(activeKeys);
     const next = Array.isArray(previous) ? previous.filter(key => active.has(key)) : [];
     for (const key of activeKeys) if (!next.includes(key)) next.push(key);

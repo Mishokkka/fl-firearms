@@ -1,5 +1,5 @@
 export const MODULE_ID = "fl-firearms";
-export const MODULE_VERSION = "0.4.6";
+export const MODULE_VERSION = "0.4.7";
 export const DATA_SCHEMA_VERSION = 4;
 
 export const DEFAULT_MISHAP_TABLE_NAMES = Object.freeze({

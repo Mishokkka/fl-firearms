@@ -1,11 +1,11 @@
-import { MODULE_ID, TIMING } from "./constants.js";
+import { MODULE_ID } from "./constants.js";
 import { isFirearm } from "./firearm-data.js";
 import { buildRollContext, cancelPendingRollContext, setPendingRollContext } from "./roll-context.js";
 import { createEmptyMagazineNotice, getMagazineCapacity, getMagazineCurrent, isEmptyMagazineAttack, isMagazineWeapon } from "./magazine.js";
 import { SETTINGS, getSetting } from "./settings.js";
 import { debug, log, warn } from "./logger.js";
 
-const ROLL_METHOD_NAMES = Object.freeze(["rollGear", "rollAction"]);
+const ROLL_METHOD_NAMES = Object.freeze(["rollGear"]);
 const adapterStatus = { patchedClasses: 0, patchedMethods: 0, classNames: [] };
 
 export function initActorSheetPatches() {
@@ -24,7 +24,7 @@ export function initActorSheetPatches() {
     }
 
     if (adapterStatus.patchedMethods === 0) {
-        warn("rollGear/rollAction were not found on registered Actor sheets");
+        warn("rollGear was not found on registered Actor sheets");
         if (game.user?.isGM) ui.notifications.error("FL Firearms: не удалось подключиться к броскам Forbidden Lands. Откройте диагностику модуля.");
     } else {
         log(`roll adapter: ${adapterStatus.patchedMethods} methods on ${adapterStatus.patchedClasses} sheet classes`);
@@ -72,12 +72,11 @@ function patchSheetRollMethod(sheetClass, methodName) {
             return null;
         }
 
-        const nonce = setPendingRollContext(context, TIMING.ATTACK_ROLL_CONTEXT_TTL);
+        const nonce = setPendingRollContext(context, null);
         try {
             return await original.apply(this, args);
-        } catch (error) {
+        } finally {
             cancelPendingRollContext(nonce);
-            throw error;
         }
     };
 

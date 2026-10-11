@@ -1,7 +1,9 @@
 import { MODULE_ID } from "./constants.js";
 import { SETTINGS, getSetting } from "./settings.js";
-import { escapeAttribute, evaluateRoll, resolveItemFromMessage } from "./utils.js";
-import { isFirearm } from "./firearm-data.js";
+import { escapeAttribute, evaluateRoll, resolveItemFromMessage, createServiceMessage } from "./utils.js";
+import { documentActions } from "./action-queue.js";
+import { runPrimaryFirearmChecks } from "./kamora.js";
+import { isFirearm, toInteger } from "./firearm-data.js";
 import { renderModuleTemplate } from "./templates.js";
 import { warn } from "./logger.js";
 
@@ -14,11 +16,22 @@ const RESOURCE_STEPS = Object.freeze({
     4: 12
 });
 
-const MAGAZINE_LOCKS = new Map();
-const PROCESSED_AMMO_MESSAGES = new WeakSet();
+const AMMO_MESSAGE_STATE = new WeakMap();
 
 export function initMagazineHooks() {
-    Hooks.on("createChatMessage", handleCreatedChatMessageForAmmoSpend);
+    Hooks.on("createChatMessage", (message, options, userId) => {
+        void handleCreatedChatMessageForAmmoSpend(message, options, userId).catch(error => {
+            warn("firearm action failed", error);
+            ui.notifications.error(`FL Firearms: ${error.message}`);
+        });
+    });
+    Hooks.on("renderChatMessageHTML", message => {
+        if (!AMMO_MESSAGE_STATE.get(message)?.failed) return;
+        void handleCreatedChatMessageForAmmoSpend(message, {}, game.user.id).catch(error => {
+            warn("firearm action retry failed", error);
+            ui.notifications.error(`FL Firearms: ${error.message}`);
+        });
+    });
 }
 
 // =========================================================================
@@ -172,7 +185,8 @@ function renderMagazineCounter(item, weaponRow) {
         }
 
         updateMagazineInputWidth(input);
-        bindMagazineInput(item, input, capacity);
+        input.disabled = !item.isOwner;
+        bindMagazineInput(item, input);
     }
 
     if (max && max.textContent !== String(capacity)) {
@@ -180,7 +194,7 @@ function renderMagazineCounter(item, weaponRow) {
     }
 }
 
-function bindMagazineInput(item, input, capacity) {
+function bindMagazineInput(item, input) {
     if (input.dataset.flFirearmsBound === "1") return;
 
     input.dataset.flFirearmsBound = "1";
@@ -190,12 +204,14 @@ function bindMagazineInput(item, input, capacity) {
         event.stopPropagation();
 
         const raw = parseInt(input.value, 10);
-        const next = clampNumber(Number.isFinite(raw) ? raw : 0, 0, capacity);
+        const next = clampNumber(Number.isFinite(raw) ? raw : 0, 0, getMagazineCapacity(item));
 
         input.value = String(next);
         updateMagazineInputWidth(input);
 
-        await item.setFlag(MODULE_ID, "magCurrent", next);
+        if (!item.isOwner) return;
+        try { await setMagazineCurrent(item, next); }
+        catch (error) { ui.notifications.error(error.message); input.value = String(getMagazineCurrent(item)); }
     });
 
     input.addEventListener("input", () => {
@@ -221,6 +237,7 @@ function renderMagazineButtons(actor, item, weaponRow) {
 
     ensureLoadMagazineButton(actor, item, container);
     ensureTopOffButton(actor, item, container);
+    container.querySelectorAll("button").forEach(button => { button.disabled = !item.isOwner || button.dataset.pending === "1"; });
 }
 
 function ensureLoadMagazineButton(actor, item, container) {
@@ -239,7 +256,7 @@ function ensureLoadMagazineButton(actor, item, container) {
             event.preventDefault();
             event.stopPropagation();
 
-            await loadFullMagazine(actor, item);
+            await runButtonAction(button, () => loadFullMagazine(actor, item));
         });
 
         container.appendChild(button);
@@ -273,7 +290,7 @@ function ensureTopOffButton(actor, item, container) {
             event.preventDefault();
             event.stopPropagation();
 
-            await topOffMagazine(actor, item);
+            await runButtonAction(button, () => topOffMagazine(actor, item));
         });
 
         container.appendChild(button);
@@ -297,52 +314,66 @@ function cleanupMagazineControls(root, activeIds) {
 // 3. АВТОМАТИЧЕСКИЙ РАСХОД ПАТРОНА ПРИ ВЫСТРЕЛЕ
 // =========================================================================
 
-async function handleCreatedChatMessageForAmmoSpend(message, options, userId) {
-    if (userId !== game.user.id) return;
-    if (!getSetting(SETTINGS.AUTO_SPEND_AMMO)) return;
-    if (!message.getFlag(MODULE_ID, "isFirearmAttack")) return;
-    if (message.getFlag(MODULE_ID, "isPushRoll") || message.getFlag(MODULE_ID, "ammoSpent")) return;
-    if (PROCESSED_AMMO_MESSAGES.has(message)) return;
-
+export async function handleCreatedChatMessageForAmmoSpend(message, options, userId) {
+    if (userId !== game.user.id || !message.getFlag(MODULE_ID, "isFirearmAttack") || message.getFlag(MODULE_ID, "isPushRoll")) return;
     const item = resolveItemFromMessage(message);
-    if (!isMagazineWeapon(item)) return;
-
-    const capacity = getMagazineCapacity(item);
-    if (capacity <= 0) return;
-
-    // createChatMessage должен обрабатываться один раз на объект сообщения.
-    // WeakSet дает ту же идемпотентность без persisted ChatMessage.setFlag().
-    PROCESSED_AMMO_MESSAGES.add(message);
-    const emptyAtTrigger = !!message.getFlag(MODULE_ID, "emptyMagazineAttack");
-
-    if (emptyAtTrigger) {
-        await createEmptyMagazineNotice(item.actor, item, { speaker: message.speaker, source: "chat-fallback" });
-        return;
-    }
-
-    await withMagazineLock(item, async () => {
-        const oldAmmo = getMagazineCurrent(item);
-        const ammoCost = Math.max(Number(message.getFlag(MODULE_ID, "ammoCost")) || 1, 1);
-        const newAmmo = Math.max(oldAmmo - ammoCost, 0);
-        await item.setFlag(MODULE_ID, "magCurrent", newAmmo);
-        Hooks.callAll(`${MODULE_ID}.magazineChanged`, item.actor, item, oldAmmo, newAmmo, { reason: "shot", message });
-        Hooks.callAll(`${MODULE_ID}.attackFired`, item.actor, item, { message, oldAmmo, newAmmo, ammoCost });
-        await showAmmoSpendFeedback(item, oldAmmo, newAmmo, capacity, message.speaker);
-    });
+    if (!isFirearm(item)) return;
+    const state = AMMO_MESSAGE_STATE.get(message) ?? {};
+    AMMO_MESSAGE_STATE.set(message, state);
+    if (state.promise || state.done) return state.promise;
+    state.failed = false;
+    state.promise = (async () => {
+        if (message.getFlag(MODULE_ID, "emptyMagazineAttack")) {
+            if (!state.emptyNotice) {
+                await createEmptyMagazineNotice(item.actor, item, { speaker: message.speaker, source: "chat-fallback", sourceMessage: message });
+                state.emptyNotice = true;
+                Hooks.callAll(`${MODULE_ID}.dryFire`, item.actor, item, { message });
+            }
+            state.done = true;
+            return;
+        }
+        if (!state.ammo) {
+            if (message.getFlag(MODULE_ID, "ammoHandled")) {
+                state.ammo = { oldAmmo: message.getFlag(MODULE_ID, "magazineBeforeShot"), newAmmo: message.getFlag(MODULE_ID, "magazineAfterShot"), spent: message.getFlag(MODULE_ID, "magazineBeforeShot") - message.getFlag(MODULE_ID, "magazineAfterShot") };
+            } else if (isMagazineWeapon(item) && getMagazineCapacity(item) > 0 && getSetting(SETTINGS.AUTO_SPEND_AMMO) && !message.getFlag(MODULE_ID, "ammoSpent")) {
+                state.ammo = await spendMagazineAmmo(item, message.getFlag(MODULE_ID, "ammoCost") ?? 1, { reason: "shot", message });
+                if (!state.ammo.spent) {
+                    await createEmptyMagazineNotice(item.actor, item, { sourceMessage: message });
+                    Hooks.callAll(`${MODULE_ID}.dryFire`, item.actor, item, { message });
+                    state.done = true;
+                    return;
+                }
+            } else state.ammo = {};
+        }
+        if (!state.fired) {
+            state.fired = true;
+            Hooks.callAll(`${MODULE_ID}.attackFired`, item.actor, item, { message, ammoCost: message.getFlag(MODULE_ID, "ammoCost") ?? 1, ...state.ammo });
+        }
+        if (!state.feedback) {
+            await showAmmoSpendFeedback(item, state.ammo.oldAmmo, state.ammo.newAmmo, getMagazineCapacity(item), message);
+            state.feedback = true;
+        }
+        await runPrimaryFirearmChecks(item.actor, item, message);
+        state.done = true;
+    })();
+    try { return await state.promise; }
+    catch (error) { state.failed = true; throw error; }
+    finally { state.promise = null; }
 }
 
-export async function createEmptyMagazineNotice(actor, item, { speaker = null, source = "manual" } = {}) {
+export async function createEmptyMagazineNotice(actor, item, { speaker = null, source = "manual", sourceMessage = null } = {}) {
     const capacity = getMagazineCapacity(item);
     ui.notifications.warn(`${item.name}: магазин пуст.`);
     const content = await renderModuleTemplate(`modules/${MODULE_ID}/templates/chat/empty-magazine.hbs`, { itemName: item.name, capacity });
-    return ChatMessage.create({
+    return createServiceMessage({
         speaker: speaker ?? ChatMessage.getSpeaker({ actor }),
         content,
         flags: { [MODULE_ID]: { emptyMagazineNotice: true, emptyMagazineAttack: true, source, actorId: actor?.id ?? null, actorUuid: actor?.uuid ?? null, itemId: item.id, itemUuid: item.uuid } }
-    });
+    }, sourceMessage);
 }
 
-async function showAmmoSpendFeedback(item, oldAmmo, newAmmo, capacity, speaker) {
+async function showAmmoSpendFeedback(item, oldAmmo, newAmmo, capacity, sourceMessage) {
+    if (oldAmmo === undefined || newAmmo === undefined) return;
     const mode = getSetting(SETTINGS.AMMO_SPEND_FEEDBACK);
     if (mode === "silent") return;
     if (mode === "notification") {
@@ -350,51 +381,36 @@ async function showAmmoSpendFeedback(item, oldAmmo, newAmmo, capacity, speaker) 
         return;
     }
     const content = await renderModuleTemplate(`modules/${MODULE_ID}/templates/chat/ammo-spent.hbs`, { itemName: item.name, oldAmmo, newAmmo, capacity });
-    await ChatMessage.create({ speaker, content, flags: { [MODULE_ID]: { ammoSpendNotice: true, itemId: item.id, itemUuid: item.uuid } } });
-}
-
-async function withMagazineLock(item, operation) {
-    const key = item.uuid;
-    const previous = MAGAZINE_LOCKS.get(key) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(operation);
-    MAGAZINE_LOCKS.set(key, current);
-    try {
-        return await current;
-    } finally {
-        if (MAGAZINE_LOCKS.get(key) === current) MAGAZINE_LOCKS.delete(key);
-    }
+    await createServiceMessage({ speaker: sourceMessage.speaker, content, flags: { [MODULE_ID]: { ammoSpendNotice: true, itemId: item.id, itemUuid: item.uuid } } }, sourceMessage);
 }
 
 // =========================================================================
 // 4. ЛОГИКА ЗАРЯДКИ
 // =========================================================================
 
-export async function loadFullMagazine(actor, item) {
+async function executeLoadMagazine(item) {
+    const actor = item.actor;
+    validateMagazine(actor, item);
     const capacity = getMagazineCapacity(item);
     const current = getMagazineCurrent(item);
     const missing = Math.max(capacity - current, 0);
 
     if (capacity <= 0) {
-        ui.notifications.warn(`${item.name}: не указана емкость магазина.`);
-        return;
+        return { notice: `${item.name}: не указана емкость магазина.`, level: "warn" };
     }
 
     if (missing <= 0) {
-        ui.notifications.info(`${item.name}: магазин уже полон.`);
-        return;
+        return { notice: `${item.name}: магазин уже полон.`, level: "info" };
     }
 
     const resource = getConsumableResource(actor, "arrows");
 
     if (!resource) {
-        ui.notifications.warn(`${actor.name}: ресурс Bullets/Arrows не найден.`);
-        warn("actor consumable snapshot", actor.toObject?.(false)?.system ?? actor.system);
-        return;
+        return { notice: `${actor.name}: ресурс Bullets/Arrows не найден.`, level: "warn" };
     }
 
     if (!resource.dieSize) {
-        ui.notifications.warn(`${actor.name}: ресурс Bullets/Arrows пуст.`);
-        return;
+        return { notice: `${actor.name}: ресурс Bullets/Arrows пуст.`, level: "warn" };
     }
 
     const resourceMode = getSetting(SETTINGS.MAGAZINE_LOAD_RESOURCE_MODE);
@@ -406,13 +422,10 @@ export async function loadFullMagazine(actor, item) {
     const results = getRollResults(roll);
     const shouldDeplete = results.some(value => value <= 2);
 
-    if (shouldDeplete) {
-        await decreaseConsumableResource(actor, resource);
-    }
 
-    await item.setFlag(MODULE_ID, "magCurrent", capacity);
+    await commitLoadedMagazine(item, capacity, resource, shouldDeplete);
 
-    await createMagazineMessage(actor, item, {
+    return {
         title: "Зарядка магазина",
         oldAmmo: current,
         newAmmo: capacity,
@@ -423,34 +436,31 @@ export async function loadFullMagazine(actor, item) {
         resourceDecreased: shouldDeplete,
         oldResourceDie: resource.dieSize,
         newResourceDie: shouldDeplete ? resourceStepToDie(resource.step - 1) : resource.dieSize
-    });
+    };
 }
 
-export async function topOffMagazine(actor, item) {
+async function executeTopOffMagazine(item) {
+    const actor = item.actor;
+    validateMagazine(actor, item, true);
     const capacity = getMagazineCapacity(item);
     const current = getMagazineCurrent(item);
 
     if (capacity <= 0) {
-        ui.notifications.warn(`${item.name}: не указана емкость магазина.`);
-        return;
+        return { notice: `${item.name}: не указана емкость магазина.`, level: "warn" };
     }
 
     if (current >= capacity) {
-        ui.notifications.info(`${item.name}: магазин уже полон.`);
-        return;
+        return { notice: `${item.name}: магазин уже полон.`, level: "info" };
     }
 
     const resource = getConsumableResource(actor, "arrows");
 
     if (!resource) {
-        ui.notifications.warn(`${actor.name}: ресурс Bullets/Arrows не найден.`);
-        warn("actor consumable snapshot", actor.toObject?.(false)?.system ?? actor.system);
-        return;
+        return { notice: `${actor.name}: ресурс Bullets/Arrows не найден.`, level: "warn" };
     }
 
     if (!resource.dieSize) {
-        ui.notifications.warn(`${actor.name}: ресурс Bullets/Arrows пуст.`);
-        return;
+        return { notice: `${actor.name}: ресурс Bullets/Arrows пуст.`, level: "warn" };
     }
 
     const formula = `1d${resource.dieSize}`;
@@ -458,15 +468,12 @@ export async function topOffMagazine(actor, item) {
     const results = getRollResults(roll);
     const shouldDeplete = results.some(value => value <= 2);
 
-    if (shouldDeplete) {
-        await decreaseConsumableResource(actor, resource);
-    }
 
     const nextAmmo = Math.min(current + 1, capacity);
 
-    await item.setFlag(MODULE_ID, "magCurrent", nextAmmo);
+    await commitLoadedMagazine(item, nextAmmo, resource, shouldDeplete);
 
-    await createMagazineMessage(actor, item, {
+    return {
         title: "Дозарядка",
         oldAmmo: current,
         newAmmo: nextAmmo,
@@ -477,30 +484,94 @@ export async function topOffMagazine(actor, item) {
         resourceDecreased: shouldDeplete,
         oldResourceDie: resource.dieSize,
         newResourceDie: shouldDeplete ? resourceStepToDie(resource.step - 1) : resource.dieSize
-    });
+    };
+}
+
+function validateMagazine(actor, item, topOff = false) {
+    if (!actor || actor.uuid !== item?.actor?.uuid || !isMagazineWeapon(item) || !item.isOwner) throw new Error("Команда доступна только владельцу магазина этого персонажа.");
+    if (topOff && !hasTopOff(item)) throw new Error("У оружия нет свойства Дозарядка.");
+}
+
+export async function loadFullMagazine(actor, item) {
+    validateMagazine(actor, item);
+    const data = await documentActions.run(item, "load");
+    if (data?.notice) ui.notifications[data.level](data.notice);
+    else if (data) await createMagazineMessage(actor, item, data);
+    return data;
+}
+
+export async function topOffMagazine(actor, item) {
+    validateMagazine(actor, item, true);
+    const data = await documentActions.run(item, "topOff");
+    if (data?.notice) ui.notifications[data.level](data.notice);
+    else if (data) await createMagazineMessage(actor, item, data);
+    return data;
+}
+
+async function commitLoadedMagazine(item, nextAmmo, resource, shouldDeplete) {
+    if (shouldDeplete) await decreaseConsumableResource(item.actor, resource);
+    try { await item.setFlag(MODULE_ID, "magCurrent", nextAmmo); }
+    catch (error) {
+        if (shouldDeplete) await item.actor.update({ [resource.path]: resource.step });
+        throw error;
+    }
 }
 
 export function getMagazineCapacity(item) {
-    const raw = item.getFlag(MODULE_ID, "magCapacity");
-    const value = parseInt(raw, 10);
-
-    return Number.isFinite(value) ? Math.max(value, 0) : 0;
+    return toInteger(item?.getFlag?.(MODULE_ID, "magCapacity"), 0, 999, 0);
 }
 
 export async function spendMagazineAmmo(item, amount = 1, context = {}) {
     if (!isMagazineWeapon(item)) return null;
-    return withMagazineLock(item, async () => {
-        const capacity = getMagazineCapacity(item);
-        const oldAmmo = getMagazineCurrent(item);
-        const cost = Math.max(Number.parseInt(amount, 10) || 1, 1);
-        const newAmmo = Math.max(oldAmmo - cost, 0);
-        await item.setFlag(MODULE_ID, "magCurrent", newAmmo);
-        Hooks.callAll(`${MODULE_ID}.magazineChanged`, item.actor, item, oldAmmo, newAmmo, { reason: "api", ...context });
-        return { oldAmmo, newAmmo, capacity, spent: oldAmmo - newAmmo };
-    });
+    const cost = Number(amount);
+    if (!Number.isSafeInteger(cost) || cost < 0) throw new Error("Расход патронов должен быть целым неотрицательным числом.");
+    const result = await documentActions.run(item, "spend", { amount: cost });
+    if (result.spent) Hooks.callAll(`${MODULE_ID}.magazineChanged`, item.actor, item, result.oldAmmo, result.newAmmo, { reason: "api", ...context });
+    return result;
 }
 
+export async function setMagazineCurrent(item, value, context = {}) {
+    if (!isMagazineWeapon(item)) return null;
+    const result = await documentActions.run(item, "setAmmo", { value });
+    if (result.oldAmmo !== result.newAmmo) Hooks.callAll(`${MODULE_ID}.magazineChanged`, item.actor, item, result.oldAmmo, result.newAmmo, { reason: "manual", ...context });
+    return result;
+}
+
+documentActions.register("load", executeLoadMagazine);
+documentActions.register("topOff", executeTopOffMagazine);
+documentActions.register("spend", async (item, { amount }) => {
+    validateMagazine(item.actor, item);
+    if (!Number.isSafeInteger(amount) || amount < 0) throw new Error("Некорректный расход патронов.");
+    const oldAmmo = getMagazineCurrent(item);
+    const newAmmo = Math.max(oldAmmo - amount, 0);
+    if (newAmmo !== oldAmmo) await item.setFlag(MODULE_ID, "magCurrent", newAmmo);
+    return { oldAmmo, newAmmo, capacity: getMagazineCapacity(item), spent: oldAmmo - newAmmo };
+});
+export async function refundMagazineAmmo(item, amount) {
+    const result = await documentActions.run(item, "refund", { amount });
+    Hooks.callAll(`${MODULE_ID}.magazineChanged`, item.actor, item, result.oldAmmo, result.newAmmo, { reason: "failed-roll" });
+    return result;
+}
+
+documentActions.register("refund", async (item, { amount }) => {
+    validateMagazine(item.actor, item);
+    if (!Number.isSafeInteger(amount) || amount < 0) throw new Error("Некорректный возврат патронов.");
+    const oldAmmo = getMagazineCurrent(item);
+    const newAmmo = Math.min(oldAmmo + amount, getMagazineCapacity(item));
+    if (oldAmmo !== newAmmo) await item.setFlag(MODULE_ID, "magCurrent", newAmmo);
+    return { oldAmmo, newAmmo };
+});
+
+documentActions.register("setAmmo", async (item, { value }) => {
+    validateMagazine(item.actor, item);
+    const oldAmmo = getMagazineCurrent(item);
+    const newAmmo = toInteger(value, 0, getMagazineCapacity(item), 0);
+    if (newAmmo !== oldAmmo) await item.setFlag(MODULE_ID, "magCurrent", newAmmo);
+    return { oldAmmo, newAmmo };
+});
+
 export function getMagazineCurrent(item) {
+    if (!item) return 0;
     const capacity = getMagazineCapacity(item);
     const raw = item.getFlag(MODULE_ID, "magCurrent");
 
@@ -512,7 +583,7 @@ export function getMagazineCurrent(item) {
 
     return Number.isFinite(value)
         ? clampNumber(value, 0, capacity)
-        : capacity;
+        : 0;
 }
 
 // =========================================================================
@@ -577,7 +648,7 @@ async function createMagazineMessage(actor, item, data) {
     const content = await renderModuleTemplate(`modules/${MODULE_ID}/templates/chat/magazine-action.hbs`, {
         itemName: item.name, ...data, oldResource, newResource, resourceModeLabel: data.resourceMode ? getResourceModeLabel(data.resourceMode) : ""
     });
-    await ChatMessage.create({
+    await createServiceMessage({
         speaker: ChatMessage.getSpeaker({ actor }), content,
         flags: { [MODULE_ID]: { magazineAction: true, actorId: actor.id, actorUuid: actor.uuid, itemId: item.id, itemUuid: item.uuid, action: data.title, oldAmmo: data.oldAmmo, newAmmo: data.newAmmo, capacity: data.capacity, formula: data.formula, resourceMode: data.resourceMode ?? null, results: data.results, resourceDecreased: data.resourceDecreased, oldResourceDie: data.oldResourceDie, newResourceDie: data.newResourceDie } }
     });
@@ -613,3 +684,33 @@ function cssEscape(value) {
 
     return String(value).replace(/["\\]/g, "\\$&");
 }
+async function runButtonAction(button, operation) {
+    if (button.dataset.pending === "1") return;
+    button.dataset.pending = "1";
+    button.disabled = true;
+    try { await operation(); }
+    catch (error) { warn("magazine command failed", error); ui.notifications.error(error.message); }
+    finally { delete button.dataset.pending; button.disabled = false; }
+}
+
+export async function updateFirearmConfiguration(item, updates) {
+    const result = await documentActions.run(item, "configure", { updates });
+    if (result.oldAmmo !== result.newAmmo) Hooks.callAll(`${MODULE_ID}.magazineChanged`, item.actor, item, result.oldAmmo, result.newAmmo, { reason: "configure" });
+    return result;
+}
+
+documentActions.register("configure", async (item, { updates }) => {
+    const prefix = `flags.${MODULE_ID}.`;
+    if (!updates || Object.keys(updates).some(key => !key.startsWith(prefix))) throw new Error("Некорректные настройки огнестрела.");
+    const oldAmmo = getMagazineCurrent(item);
+    const capacityKey = `${prefix}magCapacity`;
+    if (Object.hasOwn(updates, capacityKey)) {
+        const capacity = toInteger(updates[capacityKey], 0, 999, 0);
+        updates[capacityKey] = capacity;
+        const currentKey = `${prefix}magCurrent`;
+        if (Object.hasOwn(updates, currentKey) && updates[currentKey] !== null) updates[currentKey] = toInteger(updates[currentKey], 0, capacity, 0);
+        else if (getMagazineCurrent(item) > capacity) updates[currentKey] = capacity;
+    }
+    await item.update(updates);
+    return { oldAmmo, newAmmo: getMagazineCurrent(item) };
+});

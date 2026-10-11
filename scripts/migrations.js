@@ -8,10 +8,22 @@ const MIGRATION_BATCH_SIZE = 100;
 
 export function initDataCleanupHooks() {
     Hooks.on("preUpdateItem", clearFirearmFlagOnInvalidWeaponUpdate);
+    const normalizeActorItems = actor => Promise.all((actor?.items?.contents ?? []).map(normalizeFirearmItemData));
+    Hooks.on("createActor", (actor, _options, userId) => {
+        if (userId === game.user.id) void normalizeActorItems(actor).catch(error => warn("new actor normalization failed", error));
+    });
+    Hooks.on("createToken", (token, _options, userId) => {
+        if (!token.actorLink && userId === game.user.id) void normalizeActorItems(token.actor).catch(error => warn("new token normalization failed", error));
+    });
+    Hooks.on("createItem", (item, _options, userId) => {
+        if (userId === game.user.id) void normalizeFirearmItemData(item).catch(error => warn("new item normalization failed", error));
+    });
 }
 
 export async function runMigrations() {
     if (!game.user?.isGM) return;
+    const activeGM = (game.users?.contents ?? []).filter(user => user.active && user.isGM).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)[0];
+    if (activeGM && activeGM.id !== game.user.id) return;
     const currentVersion = Number(game.settings.get(MODULE_ID, SETTINGS.DATA_VERSION) ?? 0);
     if (currentVersion >= DATA_SCHEMA_VERSION) return;
 
@@ -19,11 +31,18 @@ export async function runMigrations() {
     const changes = collectMigrationChanges(currentVersion);
     const updated = await applyMigrationChanges(changes);
 
+    const expected = changes.world.length + [...changes.ownedByActor.values()].reduce((sum, batch) => sum + batch.length, 0);
+    if (updated !== expected) {
+        warn(`migration incomplete: ${updated}/${expected}; version unchanged`);
+        ui.notifications.warn("FL Firearms: часть данных не удалось обновить. Миграция повторится при следующем запуске.");
+        return false;
+    }
     await game.settings.set(MODULE_ID, SETTINGS.DATA_VERSION, DATA_SCHEMA_VERSION);
     log(`migrations complete; updated ${updated} item(s)`);
 }
 
 export async function normalizeFirearmItemData(item) {
+    if (!item?.isOwner) return false;
     const updates = buildItemMigrationUpdates(item, 0);
     if (!Object.keys(updates).length) return false;
     await item.update(updates);
@@ -39,7 +58,13 @@ function collectMigrationChanges(fromVersion) {
         if (Object.keys(updates).length) world.push({ item, updates });
     }
 
-    for (const actor of game.actors?.contents ?? []) {
+    const actors = new Map((game.actors?.contents ?? []).map(actor => [actor.uuid, actor]));
+    for (const scene of game.scenes?.contents ?? []) {
+        for (const token of scene.tokens?.contents ?? []) {
+            if (!token.actorLink && token.actor) actors.set(token.actor.uuid, token.actor);
+        }
+    }
+    for (const actor of actors.values()) {
         const changes = [];
         for (const item of actor.items?.contents ?? []) {
             const updates = buildItemMigrationUpdates(item, fromVersion);
@@ -60,7 +85,9 @@ async function applyMigrationChanges({ world, ownedByActor }) {
             if (typeof ItemClass?.updateDocuments === "function") {
                 try {
                     await ItemClass.updateDocuments(batch.map(({ item, updates }) => ({ _id: item.id, ...updates })));
-                    updated += batch.length;
+                    const remaining = batch.filter(({ item }) => Object.keys(buildItemMigrationUpdates(item)).length);
+                    updated += batch.length - remaining.length;
+                    updated += await applyIndividually(remaining);
                     continue;
                 } catch (error) {
                     warn(`world item migration batch failed; retrying ${batch.length} item(s) individually`, error);
@@ -76,7 +103,9 @@ async function applyMigrationChanges({ world, ownedByActor }) {
             if (typeof actor.updateEmbeddedDocuments === "function") {
                 try {
                     await actor.updateEmbeddedDocuments("Item", batch.map(({ item, updates }) => ({ _id: item.id, ...updates })));
-                    updated += batch.length;
+                    const remaining = batch.filter(({ item }) => Object.keys(buildItemMigrationUpdates(item)).length);
+                    updated += batch.length - remaining.length;
+                    updated += await applyIndividually(remaining);
                     continue;
                 } catch (error) {
                     warn(`owned item migration batch failed for ${actor.uuid ?? actor.id}; retrying ${batch.length} item(s) individually`, error);
@@ -95,7 +124,7 @@ async function applyIndividually(changes) {
     for (const { item, updates } of changes) {
         try {
             await item.update(updates);
-            updated += 1;
+            if (!Object.keys(buildItemMigrationUpdates(item)).length) updated += 1;
         } catch (error) {
             warn(`migration failed for ${item.uuid ?? item.id}`, error);
         }

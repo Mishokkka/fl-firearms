@@ -105,7 +105,8 @@ export function fromUuidSyncSafe(uuid) {
     if (!uuid) return null;
 
     if (typeof globalThis.fromUuidSync === "function") {
-        return globalThis.fromUuidSync(uuid);
+        try { return globalThis.fromUuidSync(uuid); }
+        catch (err) { debug("UUID resolution failed", uuid, err); return null; }
     }
 
     return null;
@@ -116,6 +117,7 @@ export function resolveActorFromMessage(message) {
     const actorId = message.getFlag(MODULE_ID, "actorId");
 
     let actor = fromUuidSyncSafe(actorUuid);
+    if (!actor && message.speaker?.token && message.speaker?.scene) actor = ChatMessage.getSpeakerActor(message.speaker);
 
     if (!actor && actorId) actor = game.actors.get(actorId);
     if (!actor) actor = ChatMessage.getSpeakerActor(message.speaker);
@@ -149,23 +151,29 @@ export function resolveItemFromMessage(message, data = {}) {
     const rollOptions = getFirstRollOptions(message, data);
 
     if (rollOptions.item) {
-        item = actor.items.getName(rollOptions.item);
+        item = findUniqueNamedItem(actor, rollOptions.item);
         if (item) return item;
     }
 
     if (rollOptions.itemName) {
-        item = actor.items.getName(rollOptions.itemName);
+        item = findUniqueNamedItem(actor, rollOptions.itemName);
         if (item) return item;
     }
 
     const flaggedItemName = getMessageFlag(message, data, "itemName");
 
     if (flaggedItemName) {
-        item = actor.items.getName(flaggedItemName);
+        item = findUniqueNamedItem(actor, flaggedItemName);
         if (item) return item;
     }
 
     return null;
+}
+
+function findUniqueNamedItem(actor, name) {
+    if (typeof name !== "string") return null;
+    const items = [...actor.items].filter(item => item.name === name);
+    return items.length === 1 ? items[0] : null;
 }
 
 export function getMessageFlag(message, data, key) {
@@ -244,8 +252,8 @@ function extractHtmlDataValues(content, dataName) {
 }
 
 function addIfTruthy(set, value) {
-    if (value === undefined || value === null || value === "") return;
-
+    if (Array.isArray(value)) { value.forEach(entry => addIfTruthy(set, entry)); return; }
+    if (value === undefined || value === null || value === "" || typeof value === "object") return;
     set.add(String(value));
 }
 
@@ -294,15 +302,11 @@ export function messageLooksLikeFblRoll(message, data = {}) {
 export async function evaluateRoll(formula) {
     const roll = new Roll(formula);
 
-    try {
-        return await roll.evaluate();
-    } catch (err) {
-        return await roll.evaluate({ async: true });
-    }
+    return roll.evaluate();
 }
 
 
-export async function playRandomCritBadSound() {
+export async function playRandomCritBadSound(sourceMessage = null) {
     const playlistName = String(getSetting(SETTINGS.CRIT_BAD_PLAYLIST) || "CritBad").trim();
     const playlist = game.playlists.getName(playlistName);
 
@@ -326,13 +330,13 @@ export async function playRandomCritBadSound() {
     const src = getPlaylistSoundSource(sound);
 
     try {
-        AudioHelper.play({
+        await AudioHelper.play({
             src,
             volume: clampVolume(getSetting(SETTINGS.CRIT_BAD_VOLUME)),
             autoplay: true,
             loop: false,
             channel: "interface"
-        }, true);
+        }, !sourceMessage?.blind && !sourceMessage?.whisper?.length);
     } catch (err) {
         error("failed to play CritBad sound", err);
     }
@@ -354,54 +358,38 @@ function clampVolume(value) {
     return Math.min(Math.max(number, 0), 1);
 }
 
-export async function drawMishapTableForItem(item, delay = 0) {
-    const draw = async () => {
-        const firearmType = item?.getFlag(MODULE_ID, "firearmType") || "regular";
+const MISHAP_RESULTS = new WeakMap();
 
-        const tableName = firearmType === "artifact"
-            ? getSetting(SETTINGS.ARTIFACT_MISHAP_TABLE)
-            : getSetting(SETTINGS.REGULAR_MISHAP_TABLE);
-
-        const table = game.tables.getName(tableName);
-
-        if (!table) {
-            ui.notifications.warn(`Осечка! Таблица "${tableName}" не найдена во вкладке Rollable Tables.`);
-            return;
-        }
-
-        const mishapRollData = await rollPowderMishapResult(item);
-        const forcedRoll = await evaluateRoll(String(mishapRollData.finalResult));
-
-        if (mishapRollData.hasTableModifiers) {
-            await createPowderMishapBreakdownMessage(item, mishapRollData);
-        }
-
-        debug(
-            `Powder Mishap: ${item?.name ?? "Unknown item"}; ` +
-            `base=${mishapRollData.baseResult}; ` +
-            `afterReliable=${mishapRollData.afterReliable}; ` +
-            `modifier=${mishapRollData.modifier}; ` +
-            `afterModifier=${mishapRollData.afterModifier}; ` +
-            `final=${mishapRollData.finalResult}; ` +
-            `features=${mishapRollData.appliedFeatures.join(", ") || "-"}`
-        );
-
-        await table.draw({
-            roll: forcedRoll,
-            recursive: true
-        });
-    };
-
-    if (delay > 0) {
-        setTimeout(() => {
-            draw().catch(err => {
-                error("delayed powder mishap draw failed", err);
-            });
-        }, delay);
-        return;
+export async function drawMishapTableForItem(item, delay = 0, sourceMessage = null) {
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    const firearmType = item?.getFlag(MODULE_ID, "firearmType") || "regular";
+    const tableName = getSetting(firearmType === "artifact" ? SETTINGS.ARTIFACT_MISHAP_TABLE : SETTINGS.REGULAR_MISHAP_TABLE);
+    const table = game.tables.getName(tableName);
+    if (!table) throw new Error(`Осечка: таблица "${tableName}" не найдена.`);
+    const mishapRollData = (sourceMessage && MISHAP_RESULTS.get(sourceMessage)) ?? await rollPowderMishapResult(item);
+    if (sourceMessage) MISHAP_RESULTS.set(sourceMessage, mishapRollData);
+    const forcedRoll = await evaluateRoll(String(mishapRollData.finalResult));
+    // This is a numbered mishap lookup, not a deck. Drawn flags must not turn
+    // a fixed number into Foundry's 10,000-attempt reroll loop.
+    const results = [...table.results].filter(result => {
+        const [min, max] = result.range ?? [];
+        return forcedRoll.total >= min && forcedRoll.total <= max;
+    });
+    if (!results.length) throw new Error(`Таблица "${tableName}" не содержит результата ${forcedRoll.total}.`);
+    const expanded = [];
+    for (const result of results) {
+        const nested = result.type === "document" && result.documentUuid ? await fromUuid(result.documentUuid) : null;
+        if (nested?.documentName === "RollTable") expanded.push(...(await nested.roll({ recursive: true })).results);
+        else expanded.push(result);
     }
-
-    await draw();
+    if (!expanded.length) throw new Error(`Вложенная таблица "${tableName}" не вернула результата.`);
+    if (mishapRollData.hasTableModifiers) await createPowderMishapBreakdownMessage(item, mishapRollData, sourceMessage);
+    await table.toMessage(expanded, {
+        roll: forcedRoll,
+        messageData: { ...getMessageVisibility(sourceMessage), speaker: sourceMessage?.speaker ?? ChatMessage.getSpeaker({ actor: item.actor }), flags: { [MODULE_ID]: { powderMishapResult: true, itemUuid: item.uuid } } },
+        messageOptions: { rollMode: getVisibilityRollMode(sourceMessage) }
+    });
+    return { roll: forcedRoll, results: expanded };
 }
 
 async function rollPowderMishapResult(item) {
@@ -414,7 +402,7 @@ async function rollPowderMishapResult(item) {
     });
 }
 
-async function createPowderMishapBreakdownMessage(item, mishapRollData) {
+async function createPowderMishapBreakdownMessage(item, mishapRollData, sourceMessage) {
     if (!item || !mishapRollData) return;
     const actor = item.parent?.documentName === "Actor" ? item.parent : null;
     const content = await renderModuleTemplate(`modules/${MODULE_ID}/templates/chat/mishap-breakdown.hbs`, {
@@ -423,13 +411,29 @@ async function createPowderMishapBreakdownMessage(item, mishapRollData) {
         finalResult: mishapRollData.finalResult,
         featureText: mishapRollData.appliedFeatures.length ? mishapRollData.appliedFeatures.join(", ") : "нет"
     });
-    await ChatMessage.create({
+    await createServiceMessage({
         speaker: actor ? ChatMessage.getSpeaker({ actor }) : ChatMessage.getSpeaker(),
         content,
         flags: { [MODULE_ID]: { powderMishapBreakdown: true, itemId: item.id, itemUuid: item.uuid, baseResult: mishapRollData.baseResult, finalResult: mishapRollData.finalResult, appliedFeatures: mishapRollData.appliedFeatures } }
-    });
+    }, sourceMessage);
 }
 
 function hasFeature(item, key) {
     return hasFirearmFeature(item, key);
+}
+
+export function getMessageVisibility(sourceMessage = null) {
+    if (sourceMessage) return { whisper: [...(sourceMessage.whisper ?? [])].map(user => user.id ?? user), blind: !!sourceMessage.blind };
+    const data = {};
+    ChatMessage.applyRollMode?.(data, game.settings.get("core", "rollMode") ?? "publicroll");
+    return data;
+}
+
+function getVisibilityRollMode(sourceMessage) {
+    if (!sourceMessage) return game.settings.get("core", "rollMode") ?? "publicroll";
+    return sourceMessage.blind ? "blindroll" : sourceMessage.whisper?.length ? "gmroll" : "publicroll";
+}
+
+export function createServiceMessage(data, sourceMessage = null) {
+    return ChatMessage.create({ ...data, ...getMessageVisibility(sourceMessage) });
 }

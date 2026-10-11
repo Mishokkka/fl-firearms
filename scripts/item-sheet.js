@@ -5,6 +5,7 @@ import {
     isRangedWeapon,
     sanitizeFeatureValue
 } from "./firearm-data.js";
+import { updateFirearmConfiguration } from "./magazine.js";
 import { normalizeFirearmItemData } from "./migrations.js";
 import { debug, warn } from "./logger.js";
 import { escapeAttribute, getTooltipContent } from "./utils.js";
@@ -42,6 +43,11 @@ function renderFirearmItemSheet(app, html) {
     const row = renderMainRow(app, root, item);
     if (!row) return;
     renderFeatureChips(app, root, item, row);
+    const editable = item.isOwner && app.isEditable !== false;
+    if (!editable) {
+        root.querySelectorAll(".fl-firearms-row input, .fl-firearms-row select, .fl-features-wrapper input").forEach(control => { control.disabled = true; });
+        root.querySelectorAll(".fl-features-wrapper a, .fl-firearm-toggle").forEach(control => { control.setAttribute("aria-disabled", "true"); control.tabIndex = -1; });
+    }
 }
 
 function cleanupInjectedUi(root) {
@@ -63,14 +69,16 @@ function renderToggle(app, root, item) {
     toggle.setAttribute("role", "button");
     toggle.setAttribute("tabindex", "0");
     toggle.setAttribute("aria-pressed", String(enabled));
+    if (!item.isOwner || app.isEditable === false) { toggle.setAttribute("aria-disabled", "true"); toggle.tabIndex = -1; }
     toggle.innerHTML = `<i class="far ${enabled ? "fa-check-circle" : "fa-circle"}"></i> Огнестрел`;
 
     const activate = async event => {
         event.preventDefault();
         event.stopPropagation();
+        if (!item.isOwner || app.isEditable === false) return;
         const generation = getItemSheetRenderGeneration(app);
         const next = !item.getFlag(MODULE_ID, "isFirearm");
-        await item.setFlag(MODULE_ID, "isFirearm", next);
+        await saveFlag(item, "isFirearm", next);
         await ensureItemSheetRendered(app, generation);
     };
 
@@ -153,42 +161,39 @@ function bindMainRowListeners(app, item, row) {
     const apOp = row.querySelector(".fl-ap-op");
 
     firearmType?.addEventListener("change", async event => {
-        await item.setFlag(MODULE_ID, "firearmType", event.currentTarget.value || "regular");
+        await saveFlag(item, "firearmType", event.currentTarget.value || "regular");
         updateMainRowState(row);
     });
 
     reloadType?.addEventListener("change", async event => {
         const value = event.currentTarget.value || "Slow";
-        await item.setFlag(MODULE_ID, "reloadType", value);
+        await saveFlag(item, "reloadType", value);
         updateMainRowState(row);
     });
 
     reloadValue?.addEventListener("change", event => {
-        void item.setFlag(MODULE_ID, "reloadValue", String(event.currentTarget.value ?? "").trim().slice(0, 40));
+        void saveFlag(item, "reloadValue", String(event.currentTarget.value ?? "").trim().slice(0, 40));
     });
 
     magCapacity?.addEventListener("change", async event => {
         const capacity = clampInteger(event.currentTarget.value, 0, 999);
         event.currentTarget.value = String(capacity);
-        const rawCurrent = item.getFlag(MODULE_ID, "magCurrent");
         const updates = { [`flags.${MODULE_ID}.magCapacity`]: capacity };
-        if (rawCurrent !== null && rawCurrent !== undefined && rawCurrent !== "" && Number(rawCurrent) > capacity) {
-            updates[`flags.${MODULE_ID}.magCurrent`] = capacity;
-        }
-        await item.update(updates);
+        await saveChanges(item, updates);
     });
 
     apValue?.addEventListener("change", event => {
         const text = String(event.currentTarget.value ?? "").trim().replace(",", ".");
         const value = text === "" ? "" : Number(text);
-        void item.setFlag(MODULE_ID, "apValue", Number.isFinite(value) ? value : "");
+        void saveFlag(item, "apValue", Number.isFinite(value) ? value : "");
     });
 
     apOp?.addEventListener("change", event => {
         const value = ["*", "+", "-"].includes(event.currentTarget.value) ? event.currentTarget.value : "*";
-        void item.setFlag(MODULE_ID, "apOp", value);
+        void saveFlag(item, "apOp", value);
     });
 
+    row.addEventListener("change", event => event.stopPropagation());
     row.querySelectorAll("input, select").forEach(control => {
         control.addEventListener("click", event => event.stopPropagation());
     });
@@ -274,6 +279,7 @@ function createActiveFeatureChip(app, item, feature) {
     chip.querySelector(".fl-remove-feature")?.addEventListener("click", async event => {
         event.preventDefault();
         event.stopPropagation();
+        if (!item.isOwner || app.isEditable === false) return;
         const generation = getItemSheetRenderGeneration(app);
         await removeFeature(item, feature.key);
         await ensureItemSheetRendered(app, generation);
@@ -285,7 +291,7 @@ function createActiveFeatureChip(app, item, feature) {
         event.stopPropagation();
         const value = sanitizeFeatureValue(feature, event.currentTarget.value);
         event.currentTarget.value = value ?? "";
-        await item.setFlag(MODULE_ID, `val_${feature.key}`, value);
+        await saveFlag(item, `val_${feature.key}`, value);
     });
     input?.addEventListener("mousedown", event => event.stopPropagation());
     input?.addEventListener("dragstart", event => event.stopPropagation());
@@ -302,6 +308,7 @@ function createInactiveFeatureChip(app, item, feature) {
     chip.addEventListener("click", async event => {
         event.preventDefault();
         event.stopPropagation();
+        if (!item.isOwner || app.isEditable === false) return;
         const generation = getItemSheetRenderGeneration(app);
         await addFeature(item, feature.key);
         await ensureItemSheetRendered(app, generation);
@@ -312,7 +319,7 @@ function createInactiveFeatureChip(app, item, feature) {
 async function addFeature(item, key) {
     const order = getOrderedActiveFeatureKeys(item);
     if (!order.includes(key)) order.push(key);
-    await item.update({
+    await saveChanges(item, {
         [`flags.${MODULE_ID}.feat_${key}`]: true,
         [`flags.${MODULE_ID}.featureOrder`]: order
     });
@@ -320,7 +327,7 @@ async function addFeature(item, key) {
 
 async function removeFeature(item, key) {
     const order = getFeatureOrder(item).filter(existingKey => existingKey !== key);
-    await item.update({
+    await saveChanges(item, {
         [`flags.${MODULE_ID}.feat_${key}`]: false,
         [`flags.${MODULE_ID}.val_${key}`]: null,
         [`flags.${MODULE_ID}.featureOrder`]: order
@@ -373,6 +380,7 @@ function activateFeatureDragAndDrop(app, item, container) {
             if (!droppedKey || !targetKey || droppedKey === targetKey) return;
             const rect = chip.getBoundingClientRect();
             const placement = event.clientX > rect.left + rect.width / 2 ? "after" : "before";
+            if (!item.isOwner || app.isEditable === false) return;
             const generation = getItemSheetRenderGeneration(app);
             await reorderFeatures(item, droppedKey, targetKey, placement);
             await ensureItemSheetRendered(app, generation);
@@ -389,8 +397,9 @@ function activateFeatureDragAndDrop(app, item, container) {
         if (!droppedKey) return;
         const order = getOrderedActiveFeatureKeys(item).filter(key => key !== droppedKey);
         order.push(droppedKey);
+        if (!item.isOwner || app.isEditable === false) return;
         const generation = getItemSheetRenderGeneration(app);
-        await item.setFlag(MODULE_ID, "featureOrder", order);
+        await saveFlag(item, "featureOrder", order);
         await ensureItemSheetRendered(app, generation);
     });
 }
@@ -400,7 +409,7 @@ async function reorderFeatures(item, draggedKey, targetKey, placement) {
     const targetIndex = order.indexOf(targetKey);
     if (targetIndex < 0) return;
     order.splice(placement === "after" ? targetIndex + 1 : targetIndex, 0, draggedKey);
-    await item.setFlag(MODULE_ID, "featureOrder", order);
+    await saveFlag(item, "featureOrder", order);
 }
 
 function setDomTooltip(element, pageName) {
@@ -460,4 +469,14 @@ function escapeText(value) {
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
+}
+
+async function saveChanges(item, updates) {
+    if (!item.isOwner) return null;
+    try { return await updateFirearmConfiguration(item, updates); }
+    catch (error) { warn("item field update failed", error); ui.notifications.error(`FL Firearms: ${error.message}`); return null; }
+}
+
+function saveFlag(item, key, value) {
+    return saveChanges(item, { [`flags.${MODULE_ID}.${key}`]: value });
 }

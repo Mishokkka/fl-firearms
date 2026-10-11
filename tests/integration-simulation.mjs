@@ -16,7 +16,7 @@ const uuidMap=new Map(); globalThis.fromUuidSync=u=>uuidMap.get(u)??null;
 class FakeItem { constructor(current){this.id='gun1';this.uuid='Actor.a1.Item.gun1';this.name='Pistol';this.type='weapon';this.system={category:'ranged'};this.flags={'isFirearm':true,'reloadType':'MAG','magCapacity':6,'magCurrent':current,'feat_Upor':true,'feat_kamora':true};this.documentName='Item';this.isOwner=true;} getFlag(_m,k){return this.flags[k]} async setFlag(_m,k,v){this.flags[k]=v;return this} async update(up){for(const [p,v] of Object.entries(up)){const key=p.split('.').at(-1);this.flags[key]=v}return this;} }
 let originalRolls=0; let messages=[]; let chatMessageFlagWrites=0;
 class FakeMessage { constructor(data){this.id='m'+(messages.length+1);this.uuid='ChatMessage.'+this.id;this.speaker=data.speaker;this.content=data.content;this.rolls=data.rolls??[];this.flags=data.flags??{};this.author={id:'u1'};} getFlag(m,k){return this.flags?.[m]?.[k]} async setFlag(m,k,v){chatMessageFlagWrites++;this.flags[m]??={};this.flags[m][k]=v;return this;} updateSource(update){deepMerge(this,update);} }
-async function dispatchCreate(msg){for(const fn of on.get('createChatMessage')??[]) await fn(msg,{},'u1');}
+async function dispatchCreate(msg){for(const fn of on.get('createChatMessage')??[]) fn(msg,{},'u1'); await new Promise(resolve=>setImmediate(resolve));}
 const ChatMessage={
  getSpeaker:({actor}={})=>({actor:actor?.id??'a1'}), getSpeakerActor:s=>actor,
  async create(data){const m=new FakeMessage(data);messages.push(m);await dispatchCreate(m);return m;}
@@ -36,7 +36,7 @@ let journalLookups=0;
 const journals={contents:[...tooltipJournals.values()],getName(name){journalLookups++;return tooltipJournals.get(name)??null},get(){return null},[Symbol.iterator](){return this.contents[Symbol.iterator]()}};
 let embeddedBatchCalls=0;
 let item=new FakeItem(0); const actor={id:'a1',uuid:'Actor.a1',name:'Hero',documentName:'Actor',items:new ItemCollection([item]),async updateEmbeddedDocuments(type,updates){assert.equal(type,'Item');embeddedBatchCalls++;for(const update of updates){const target=this.items.get(update._id);for(const [path,value] of Object.entries(update)){if(path==='_id')continue;const key=path.split('.').at(-1);if(key.startsWith('-='))delete target.flags[key.slice(2)];else target.flags[key]=value;}}return updates.map(update=>this.items.get(update._id));}};item.actor=actor;item.parent=actor;uuidMap.set(item.uuid,item);uuidMap.set(actor.uuid,actor);
-class Sheet {constructor(){this.actor=actor} async rollGear(itemId){originalRolls++;const data={speaker:{actor:'a1'},content:'<div class="fbl-chat-roll dice-roll"></div>',rolls:[{options:{itemId}}]};const m=new FakeMessage(data);for(const fn of on.get('preCreateChatMessage')??[]) fn(m,data,{},'u1');messages.push(m);await dispatchCreate(m);return m;} async rollAction(_a,itemId){return this.rollGear(itemId)} }
+class Sheet {constructor(){this.actor=actor} async rollGear(itemId){originalRolls++;const data={speaker:{actor:'a1'},content:'<div class="fbl-chat-roll dice-roll"></div>',rolls:[{options:{itemId,isAttack:true}}]};const m=new FakeMessage(data);for(const fn of on.get('preCreateChatMessage')??[]) fn(m,data,{},'u1');messages.push(m);await dispatchCreate(m);return m;} async rollAction(_a,itemId){return this.rollGear(itemId)} }
 const moduleRecord={};
 globalThis.game={settings,user:{id:'u1',isGM:true},system:{id:'forbidden-lands',title:'Forbidden Lands',version:'13.0.5'},modules:{get:id=>id==='fl-firearms'?moduleRecord:null},items:empty,actors:{contents:[actor],[Symbol.iterator](){return this.contents[Symbol.iterator]()}},tables:empty,journal:journals,playlists:empty};
 globalThis.CONFIG={Actor:{sheetClasses:{character:{default:{cls:Sheet}}}}};
@@ -54,7 +54,7 @@ const actorApp={document:actor,element:actorRoot};
 for(const fn of on.get('renderActorSheet')??[]) fn(actorApp,actorRoot,{});
 for(const fn of on.get('renderApplication')??[]) fn(actorApp,actorRoot,{});
 await Promise.resolve();
-assert.equal(treeWalkerCalls,1,'specialized and generic actor render hooks must coalesce to one sheet patch');
+assert.equal(treeWalkerCalls,0,'consumable patch must not walk biography text');
 assert.equal(observerCreates,1,'one actor root must have one MutationObserver');
 for(const fn of on.get('closeApplication')??[]) fn(actorApp);
 assert.equal(observerDisconnects,1,'closing a tracked actor sheet must disconnect its observer');

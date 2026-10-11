@@ -15,7 +15,7 @@ export function getFeatureDefinition(key) {
 }
 
 export function hasFeature(item, key) {
-    return !!item?.getFlag?.(MODULE_ID, `feat_${key}`);
+    return !!(item?.getFlag?.(MODULE_ID, `feat_${key}`) || (key === "Kamora" && item?.getFlag?.(MODULE_ID, "feat_kamora")));
 }
 
 export function getFeatureValue(item, key) {

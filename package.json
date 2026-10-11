@@ -1,0 +1,9 @@
+{
+  "name": "fl-firearms",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/run-tests.mjs && node tests/integration-simulation.mjs && node tests/reliability.mjs",
+    "check": "node tests/check-syntax.mjs"
+  }
+}

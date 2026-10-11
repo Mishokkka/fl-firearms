@@ -5,11 +5,13 @@ import { debug } from "./logger.js";
 
 const pendingContexts = new Map();
 const MAX_PENDING_CONTEXTS = 32;
+const CONFIRMED_ROLLS = new Set();
 
 export function buildRollContext(actor, item, extra = {}) {
     return {
         nonce: foundry.utils.randomID(), actorId: actor.id, actorUuid: actor.uuid,
         itemId: item.id, itemUuid: item.uuid, itemName: item.name,
+        tokenId: actor.token?.id ?? null, sceneId: actor.token?.parent?.id ?? null,
         isFirearmAttack: true, isPushRoll: false, createdAt: Date.now(), ...extra
     };
 }
@@ -17,9 +19,9 @@ export function buildRollContext(actor, item, extra = {}) {
 export function setPendingRollContext(context, ttl = TIMING.ATTACK_ROLL_CONTEXT_TTL) {
     cleanupExpiredContexts();
     while (pendingContexts.size >= MAX_PENDING_CONTEXTS) pendingContexts.delete(pendingContexts.keys().next().value);
-    const stored = { ...context, expires: Date.now() + ttl };
+    const stored = { ...context, expires: ttl === null ? Infinity : Date.now() + ttl };
     pendingContexts.set(stored.nonce, stored);
-    setTimeout(() => pendingContexts.delete(stored.nonce), ttl + 250);
+    if (ttl !== null) setTimeout(() => pendingContexts.delete(stored.nonce), ttl + 250);
     debug("queued roll context", stored.nonce, stored.itemName, stored.isPushRoll ? "push" : "attack");
     return stored.nonce;
 }
@@ -35,15 +37,33 @@ export function getPendingRollContextCount() {
 
 export function initRollContextHooks() {
     Hooks.on("preCreateChatMessage", attachPendingRollContextToMessage);
+    Hooks.on("createChatMessage", (message, _options, userId) => {
+        const nonce = message.getFlag?.(MODULE_ID, "nonce");
+        if (userId !== game.user.id || !nonce) return;
+        CONFIRMED_ROLLS.add(nonce);
+        if (CONFIRMED_ROLLS.size > 1000) CONFIRMED_ROLLS.delete(CONFIRMED_ROLLS.values().next().value);
+    });
 }
 
 function attachPendingRollContextToMessage(message, data, _options, userId) {
-    if (userId !== game.user.id || pendingContexts.size === 0) return;
+    if (userId !== game.user.id) return;
+    const roll = (message.rolls ?? data.rolls ?? [])[0];
+    const direct = roll?.options?.flFirearmsContext;
+    if (direct?.isFirearmAttack) {
+        attachContext(message, data, { ...direct, isPushRoll: !!roll.pushed });
+        cancelPendingRollContext(direct.nonce);
+        return;
+    }
+    if (pendingContexts.size === 0 || roll?.options?.isAttack !== true) return;
     cleanupExpiredContexts();
     if (isModuleServiceMessage(message, data) || !messageLooksLikeFblRoll(message, data)) return;
 
     const itemIds = collectMessageItemIds(message, data).map(String);
     const itemUuids = collectMessageItemUuids(message, data).map(String);
+    const speaker = message.speaker ?? data.speaker ?? {};
+    const rollOptions = roll?.options ?? {};
+    const speakerTokenId = speaker.token ?? rollOptions.tokenId;
+    const speakerSceneId = speaker.scene ?? rollOptions.sceneId;
     const speakerActorId = String(message.speaker?.actor ?? data?.speaker?.actor ?? "");
     const now = Date.now();
     const candidates = [];
@@ -54,6 +74,8 @@ function attachPendingRollContextToMessage(message, data, _options, userId) {
             pendingContexts.delete(context.nonce);
             continue;
         }
+        if (context.tokenId && (context.tokenId !== speakerTokenId || context.sceneId !== speakerSceneId)) continue;
+        if (!context.tokenId && speakerTokenId) continue;
         if (speakerActorId && context.actorId && speakerActorId !== String(context.actorId)) continue;
         if (hasConflictingItemReference(itemIds, itemUuids, context)) continue;
 
@@ -61,7 +83,7 @@ function attachPendingRollContextToMessage(message, data, _options, userId) {
         const exactUuid = itemUuids.includes(String(context.itemUuid));
         const hasItemReference = itemIds.length > 0 || itemUuids.length > 0;
         const age = now - context.createdAt;
-        if (!hasItemReference && age > TIMING.CONTEXT_FALLBACK_WITHOUT_ITEM_MAX_AGE) continue;
+        if (!hasItemReference) continue;
 
         const score = (exactUuid ? 100 : 0) + (exactId ? 80 : 0) + (speakerActorId ? 20 : 0) - age / 1000;
         candidates.push({ context, score });
@@ -71,12 +93,8 @@ function attachPendingRollContextToMessage(message, data, _options, userId) {
     const selected = candidates[0]?.context;
     if (!selected) return;
 
-    const update = {};
-    for (const [key, value] of Object.entries(selected)) foundry.utils.setProperty(update, `flags.${MODULE_ID}.${key}`, value);
-    foundry.utils.setProperty(update, `flags.${MODULE_ID}.contextAttachedAt`, now);
-
-    if (typeof message.updateSource === "function") message.updateSource(update);
-    else foundry.utils.mergeObject(data, update);
+    if (candidates.length > 1 && candidates[0].context.itemUuid === candidates[1].context.itemUuid) return;
+    attachContext(message, data, { ...selected, isPushRoll: !!roll?.pushed || selected.isPushRoll });
 
     pendingContexts.delete(selected.nonce);
     debug("attached roll context", selected.nonce, selected.itemName);
@@ -101,3 +119,27 @@ function hasConflictingItemReference(itemIds, itemUuids, context) {
     }
     return false;
 }
+
+function attachContext(message, data, context) {
+    const update = {};
+    for (const [key, value] of Object.entries(context)) {
+        if (key === "expires") continue;
+        foundry.utils.setProperty(update, `flags.${MODULE_ID}.${key}`, value);
+    }
+    foundry.utils.setProperty(update, `flags.${MODULE_ID}.contextAttachedAt`, Date.now());
+    if (typeof message.updateSource === "function") message.updateSource(update);
+    else foundry.utils.mergeObject(data, update);
+}
+
+export function takePendingRollContext(actor, item) {
+    for (const [nonce, context] of pendingContexts) {
+        if (context.actorUuid === actor.uuid && context.itemUuid === item.uuid) {
+            pendingContexts.delete(nonce);
+            const { expires, ...data } = context;
+            return data;
+        }
+    }
+    return null;
+}
+
+export function wasRollMessageCreated(nonce) { return CONFIRMED_ROLLS.has(nonce); }
